@@ -121,6 +121,7 @@ export default function ChatPage() {
 
   const handleDeleteSession = async (e: React.MouseEvent, id: string) => {
     e.stopPropagation();
+    const backendUrl = process.env.NEXT_PUBLIC_BACKEND_URL || "http://127.0.0.1:8000";
     const supabase = createClient();
     const { data: { session } } = await supabase.auth.getSession();
     if (!session) return;
@@ -142,6 +143,7 @@ export default function ChatPage() {
   const handleRenameSession = async (e: React.FormEvent, id: string) => {
     e.preventDefault();
     if (!editSessionTitle.trim()) return;
+    const backendUrl = process.env.NEXT_PUBLIC_BACKEND_URL || "http://127.0.0.1:8000";
     
     setSessions(prev => prev.map(s => s.id === id ? { ...s, title: editSessionTitle } : s));
     setEditingSessionId(null);
