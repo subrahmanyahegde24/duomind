@@ -1,22 +1,22 @@
-name: DuoMind Security & CI
+name: DuoMind Security & Testing CI
 
 on:
   push:
-    branches: [ "main" ]
+    branches: [ "main", "development" ]
   pull_request:
-    branches: [ "main" ]
+    branches: [ "main", "development" ]
 
 jobs:
-  frontend-security:
-    name: Frontend Security Check
+  test-and-security:
+    name: Security & Testing Checks
     runs-on: ubuntu-latest
-    defaults:
-      run:
-        working-directory: ./frontend
     steps:
       - name: Checkout Code
         uses: actions/checkout@v3
 
+      # ==========================================
+      # 1. FRONTEND: SECURITY & BUILD TESTING
+      # ==========================================
       - name: Setup Node.js
         uses: actions/setup-node@v3
         with:
@@ -24,40 +24,45 @@ jobs:
           cache: 'npm'
           cache-dependency-path: './frontend/package-lock.json'
 
-      - name: Install Dependencies
+      - name: Install Frontend Dependencies
         run: npm ci
+        working-directory: ./frontend
 
-      - name: Run NPM Audit (Security Check)
+      - name: Frontend Vulnerability Scan (NPM Audit)
         run: npm audit --audit-level=high
+        working-directory: ./frontend
 
-      - name: Build Next.js
+      - name: Frontend Build Test (Ensures code compiles correctly)
         run: npm run build
+        working-directory: ./frontend
         env:
           NEXT_PUBLIC_BACKEND_URL: "http://localhost:8000"
 
-  backend-security:
-    name: Backend Security Check
-    runs-on: ubuntu-latest
-    defaults:
-      run:
-        working-directory: ./backend
-    steps:
-      - name: Checkout Code
-        uses: actions/checkout@v3
-
+      # ==========================================
+      # 2. BACKEND: SECURITY & API TESTING
+      # ==========================================
       - name: Setup Python
         uses: actions/setup-python@v4
         with:
           python-version: '3.11'
           
-      - name: Install uv and dependencies
+      - name: Install Backend Dependencies
         run: |
           pip install uv
           uv pip install --system -r requirements.txt
-          uv pip install --system bandit ruff
+          uv pip install --system bandit ruff pytest httpx
+        working-directory: ./backend
 
-      - name: Run Bandit (Security Vulnerability Scanner)
-        run: bandit -r app/ -c "bandit.yaml" || true # Using || true so it doesn't hard-fail if you just have low warnings
+      - name: Backend Security Scan (Bandit)
+        run: bandit -r app/ -c "bandit.yaml" || true
+        working-directory: ./backend
 
-      - name: Run Ruff (Linter)
-        run: ruff check app/ || true
+      - name: Backend API Unit Tests & Health Checks
+        run: pytest tests/ -v
+        working-directory: ./backend
+        env:
+          GEMINI_API_KEY: "dummy"
+          SUPABASE_URL: "https://dummy.supabase.co"
+          SUPABASE_KEY: "dummy"
+          MONGO_URI: "mongodb://localhost:27017"
+          ENCRYPTION_KEY: "dummy"
