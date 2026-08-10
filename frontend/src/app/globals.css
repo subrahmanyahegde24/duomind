@@ -1,0 +1,51 @@
+@import "tailwindcss";
+
+/* Fix Tailwind v4 Dark Mode integration with next-themes */
+@custom-variant dark (&:is(.dark *));
+
+@theme {
+  --color-bg-main: var(--background);
+  --color-bg-sidebar: var(--sidebar);
+  --color-bg-chatbar: var(--chatbar);
+  --color-text-main: var(--foreground);
+  --color-border-main: var(--border);
+}
+
+@layer base {
+  :root {
+    --background: #FAF9F6; /* Anthropic white (yellowish cream) */
+    --foreground: #1A1A1A; /* Dark text */
+    --sidebar: #F2F0ED;    /* Slightly darker cream for sidebar */
+    --chatbar: #FFFFFF;    /* Pure white chat bar */
+    --border: #E5E5E5;
+  }
+
+  .dark {
+    --background: #1C1C1E; /* Grayish black chat area */
+    --foreground: #E5E5E5; /* Light text */
+    --sidebar: #000000;    /* Deep black sidebar */
+    --chatbar: #000000;    /* Deep black chatbar */
+    --border: #333333;
+  }
+}
+
+body {
+  background-color: var(--background);
+  color: var(--foreground);
+}
+
+/* Hide scrollbar for a cleaner look */
+::-webkit-scrollbar {
+  width: 8px;
+  height: 8px;
+}
+::-webkit-scrollbar-track {
+  background: transparent;
+}
+::-webkit-scrollbar-thumb {
+  background: transparent;
+  border-radius: 10px;
+}
+*:hover::-webkit-scrollbar-thumb {
+  background: var(--border);
+}

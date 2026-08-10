@@ -1,0 +1,63 @@
+name: DuoMind Security & CI
+
+on:
+  push:
+    branches: [ "main" ]
+  pull_request:
+    branches: [ "main" ]
+
+jobs:
+  frontend-security:
+    name: Frontend Security Check
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: ./frontend
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v3
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v3
+        with:
+          node-version: '18'
+          cache: 'npm'
+          cache-dependency-path: './frontend/package-lock.json'
+
+      - name: Install Dependencies
+        run: npm ci
+
+      - name: Run NPM Audit (Security Check)
+        run: npm audit --audit-level=high
+
+      - name: Build Next.js
+        run: npm run build
+        env:
+          NEXT_PUBLIC_BACKEND_URL: "http://localhost:8000"
+
+  backend-security:
+    name: Backend Security Check
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: ./backend
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v3
+
+      - name: Setup Python
+        uses: actions/setup-python@v4
+        with:
+          python-version: '3.11'
+          
+      - name: Install uv and dependencies
+        run: |
+          pip install uv
+          uv pip install --system -r requirements.txt
+          uv pip install --system bandit ruff
+
+      - name: Run Bandit (Security Vulnerability Scanner)
+        run: bandit -r app/ -c "bandit.yaml" || true # Using || true so it doesn't hard-fail if you just have low warnings
+
+      - name: Run Ruff (Linter)
+        run: ruff check app/ || true

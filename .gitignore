@@ -1,0 +1,63 @@
+# IDEs and OS
+.DS_Store
+.idea/
+.vscode/
+
+# Environment Variables & Credentials
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+encryption.key
+.duomind-credentials.txt
+duomind-credentials.txt
+
+# Node.js
+node_modules/
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+.pnpm-debug.log*
+
+# Next.js
+.next/
+out/
+build/
+
+# Vercel
+.vercel/
+
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+build/
+develop-eggs/
+dist/
+downloads/
+eggs/
+.eggs/
+lib/
+lib64/
+parts/
+sdist/
+var/
+wheels/
+*.egg-info/
+.installed.cfg
+*.egg
+.venv/
+venv/
+ENV/
+
+# Databases
+*.sqlite3
+*.db
+*.db-journal
+
+# Markdown Files (Ignore all except README.md)
+*.md
+!README.md
