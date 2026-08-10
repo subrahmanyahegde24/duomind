@@ -68,4 +68,4 @@ jobs:
           SUPABASE_URL: "https://dummy.supabase.co"
           SUPABASE_KEY: "dummy"
           MONGO_URI: "mongodb://localhost:27017"
-          ENCRYPTION_KEY: "dummy"
+          ENCRYPTION_KEY: "6g3xVl01Ys9yw--MW0dSWNVnHO0gfrPgQ6yI33o5vHA="
