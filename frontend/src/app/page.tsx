@@ -113,7 +113,51 @@ export default function ChatPage() {
       }
     };
     fetchUser();
+    
+    if (typeof window !== "undefined") {
+      const SpeechRecognition = (window as any).SpeechRecognition || (window as any).webkitSpeechRecognition;
+      if (SpeechRecognition) {
+        recognitionRef.current = new SpeechRecognition();
+        recognitionRef.current.continuous = true;
+        recognitionRef.current.interimResults = false;
+        
+        recognitionRef.current.onresult = (event: any) => {
+          let finalTranscript = '';
+          for (let i = event.resultIndex; i < event.results.length; ++i) {
+            if (event.results[i].isFinal) {
+              finalTranscript += event.results[i][0].transcript;
+            }
+          }
+          if (finalTranscript) {
+             setInput(prev => (prev + " " + finalTranscript).trim());
+          }
+        };
+        
+        recognitionRef.current.onerror = (event: any) => {
+          console.error("Speech recognition error", event.error);
+          setIsListening(false);
+        };
+        
+        recognitionRef.current.onend = () => {
+          setIsListening(false);
+        };
+      }
+    }
   }, []);
+  
+  const toggleListening = () => {
+    if (isListening) {
+      recognitionRef.current?.stop();
+      setIsListening(false);
+    } else {
+      if (!recognitionRef.current) {
+         alert("Voice dictation is not supported in this browser. Try Chrome or Safari.");
+         return;
+      }
+      recognitionRef.current.start();
+      setIsListening(true);
+    }
+  };
   
   const handleUpdateProfile = async (e: React.FormEvent) => {
     e.preventDefault();
