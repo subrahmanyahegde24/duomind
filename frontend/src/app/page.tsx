@@ -287,10 +287,10 @@ export default function ChatPage() {
                     setMessages(prev => {
                         const newMsgs = [...prev];
                         const lastMsg = newMsgs[newMsgs.length - 1];
-                        if (lastMsg && lastMsg.role === 'model') {
+                        if (lastMsg && lastMsg.role === 'bot') {
                             lastMsg.content += data.content;
                         } else {
-                            newMsgs.push({ role: 'model', content: data.content, created_at: new Date().toISOString() });
+                            newMsgs.push({ id: crypto.randomUUID(), role: 'bot', content: data.content });
                         }
                         return newMsgs;
                     });
@@ -361,7 +361,7 @@ export default function ChatPage() {
         const processor = audioCtx.createScriptProcessor(4096, 1, 1);
         processorRef.current = processor;
         
-        processor.onaudioprocess = (e) => {
+        processor.onaudioprocess = (e: any) => {
           const inputData = e.inputBuffer.getChannelData(0);
           const pcm16 = new Int16Array(inputData.length);
           for (let i = 0; i < inputData.length; i++) {
