@@ -47,6 +47,8 @@ The backend uses Vercel's `@vercel/python` engine to automatically convert your 
 | Variable Name | Description | Example |
 | :--- | :--- | :--- |
 | `NEXT_PUBLIC_BACKEND_URL` | The Vercel URL of your newly deployed Backend | `https://duomind-backend.vercel.app` |
+| `NEXT_PUBLIC_SUPABASE_URL` | Your Supabase Project URL | `https://xyz.supabase.co` |
+| `NEXT_PUBLIC_SUPABASE_ANON_KEY` | Your Supabase public anon key | `eyJhb...` |
 
 4. Click **Deploy**. You are now live!
 

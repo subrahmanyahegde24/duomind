@@ -13,7 +13,7 @@ class GeminiService:
         self.client = genai.Client(api_key=settings.gemini_api_key)
         self.model_name = 'gemini-3.5-flash-lite'
 
-    def generate_response_stream(self, prompt: str, history: list = None):
+    def generate_response_stream(self, prompt: str, history: list = None, files: list = None):
         try:
             formatted_contents = []
             if history:
@@ -22,7 +22,13 @@ class GeminiService:
                     if msg.get("content"):
                         formatted_contents.append({"role": role, "parts": [{"text": msg.get("content")}]})
             
-            formatted_contents.append({"role": "user", "parts": [{"text": prompt}]})
+            user_parts = []
+            if files:
+                for f in files:
+                    user_parts.append({"inline_data": {"mime_type": f.mime_type, "data": f.data}})
+            
+            user_parts.append({"text": prompt})
+            formatted_contents.append({"role": "user", "parts": user_parts})
 
             response = self.client.models.generate_content_stream(
                 model=self.model_name,

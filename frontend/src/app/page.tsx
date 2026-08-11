@@ -7,7 +7,7 @@ import { motion, AnimatePresence } from "framer-motion";
 import { createClient } from "@/lib/supabase/client";
 import { useRouter } from "next/navigation";
 import { 
-  Plus, Settings, Mic, Send, PanelLeftClose, PanelLeft, Monitor, Sun, Moon, X, User, LogOut, Shield, Pencil, Trash2, Check
+  Plus, Settings, Mic, Send, PanelLeftClose, PanelLeft, Monitor, Sun, Moon, X, User, LogOut, Shield, Pencil, Trash2, Check, Paperclip, Camera, Radio
 } from "lucide-react";
 
 type Message = {
@@ -28,6 +28,20 @@ export default function ChatPage() {
   const [input, setInput] = useState("");
   const [isLoading, setIsLoading] = useState(false);
   const [sidebarOpen, setSidebarOpen] = useState(true);
+  
+  const [attachments, setAttachments] = useState<{name: string, mime_type: string, data: string, previewUrl: string}[]>([]);
+  const [cameraModalOpen, setCameraModalOpen] = useState(false);
+  const videoRef = useRef<HTMLVideoElement>(null);
+  const fileInputRef = useRef<HTMLInputElement>(null);
+  
+  const [isListening, setIsListening] = useState(false);
+  const recognitionRef = useRef<any>(null);
+  
+  const [liveModeOpen, setLiveModeOpen] = useState(false);
+  const liveWsRef = useRef<WebSocket | null>(null);
+  const mediaRecorderRef = useRef<MediaRecorder | null>(null);
+  const audioContextRef = useRef<AudioContext | null>(null);
+  
   const [settingsOpen, setSettingsOpen] = useState(false);
   
   const [user, setUser] = useState<any>(null);
@@ -54,7 +68,7 @@ export default function ChatPage() {
     setMounted(true);
     if (window.innerWidth < 768) setSidebarOpen(false);
     
-    const backendUrl = process.env.NEXT_PUBLIC_BACKEND_URL || "http://127.0.0.1:8000";
+    const backendUrl = (process.env.NEXT_PUBLIC_BACKEND_URL || "http://127.0.0.1:8000").replace(/\/$/, "");
     
     const fetchUser = async () => {
       const supabase = createClient();
@@ -68,7 +82,7 @@ export default function ChatPage() {
         setEditMobile(user.user_metadata?.mobile || "");
         
         const savedAvatar = localStorage.getItem(`avatar_${user.id}`);
-        setAvatarUrl(savedAvatar || user.user_metadata?.avatar_url || "");
+        if (savedAvatar) setAvatarUrl(savedAvatar);
         
         const { data: mfa, error: mfaError } = await supabase.auth.mfa.listFactors();
         if (mfa && mfa.totp && mfa.totp.length > 0 && mfa.totp[0].status === "verified") {
@@ -119,9 +133,160 @@ export default function ChatPage() {
     setProfileModalOpen(false);
   };
 
+  const handleFileSelect = async (e: React.ChangeEvent<HTMLInputElement>) => {
+    const files = Array.from(e.target.files || []);
+    if (!files.length) return;
+    
+    for (const file of files) {
+      const reader = new FileReader();
+      reader.onload = (event) => {
+        const result = event.target?.result as string;
+        if (result) {
+          const base64Data = result.split(',')[1];
+          setAttachments(prev => [...prev, {
+            name: file.name,
+            mime_type: file.type,
+            data: base64Data,
+            previewUrl: result
+          }]);
+        }
+      };
+      reader.readAsDataURL(file);
+    }
+    if (fileInputRef.current) fileInputRef.current.value = "";
+  };
+
+  const removeAttachment = (index: number) => {
+    setAttachments(prev => prev.filter((_, i) => i !== index));
+  };
+
+  const openCamera = async () => {
+    setCameraModalOpen(true);
+    try {
+      const stream = await navigator.mediaDevices.getUserMedia({ video: true });
+      if (videoRef.current) {
+        videoRef.current.srcObject = stream;
+        videoRef.current.play();
+      }
+    } catch (err) {
+      console.error("Camera access denied:", err);
+      setCameraModalOpen(false);
+      alert("Could not access camera. Please check permissions.");
+    }
+  };
+
+  const closeCamera = () => {
+    if (videoRef.current && videoRef.current.srcObject) {
+      const tracks = (videoRef.current.srcObject as MediaStream).getTracks();
+      tracks.forEach(track => track.stop());
+    }
+    setCameraModalOpen(false);
+  };
+
+  const capturePhoto = () => {
+    if (!videoRef.current) return;
+    const canvas = document.createElement("canvas");
+    canvas.width = videoRef.current.videoWidth;
+    canvas.height = videoRef.current.videoHeight;
+    const ctx = canvas.getContext("2d");
+    if (ctx) {
+      ctx.drawImage(videoRef.current, 0, 0, canvas.width, canvas.height);
+      const dataUrl = canvas.toDataURL("image/jpeg");
+      const base64Data = dataUrl.split(',')[1];
+      setAttachments(prev => [...prev, {
+        name: `photo_${Date.now()}.jpg`,
+        mime_type: "image/jpeg",
+        data: base64Data,
+        previewUrl: dataUrl
+      }]);
+    }
+    closeCamera();
+  };
+
+  const startLiveMode = async () => {
+    setLiveModeOpen(true);
+    const backendWsUrl = (process.env.NEXT_PUBLIC_BACKEND_URL || "http://127.0.0.1:8000").replace(/\/$/, "").replace(/^http/, "ws");
+    
+    try {
+      const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+      const AudioContext = window.AudioContext || (window as any).webkitAudioContext;
+      audioContextRef.current = new AudioContext({ sampleRate: 24000 });
+      
+      const ws = new WebSocket(`${backendWsUrl}/api/chat/live`);
+      liveWsRef.current = ws;
+      
+      ws.binaryType = "arraybuffer";
+      
+      let nextPlayTime = 0;
+      
+      ws.onmessage = async (event) => {
+        if (event.data instanceof ArrayBuffer) {
+           try {
+              const audioCtx = audioContextRef.current;
+              if (!audioCtx) return;
+              
+              // Gemini returns PCM data natively via the server_content inline_data.
+              // To play raw PCM, we create an AudioBuffer.
+              // A 16-bit PCM at 24kHz needs to be decoded, but for simplicity, 
+              // we can rely on standard decodeAudioData if it's packed in a WAV header by Gemini,
+              // or manually feed it if it's raw. Assuming Gemini SDK handles format properly,
+              // or we just decode standard audio blobs:
+              const decodedData = await audioCtx.decodeAudioData(event.data.slice(0));
+              const source = audioCtx.createBufferSource();
+              source.buffer = decodedData;
+              source.connect(audioCtx.destination);
+              
+              const currentTime = audioCtx.currentTime;
+              if (currentTime < nextPlayTime) {
+                source.start(nextPlayTime);
+                nextPlayTime += decodedData.duration;
+              } else {
+                source.start(currentTime);
+                nextPlayTime = currentTime + decodedData.duration;
+              }
+           } catch(e) {
+              console.error("Audio decode error", e);
+           }
+        }
+      };
+
+      ws.onopen = () => {
+        const mediaRecorder = new MediaRecorder(stream, { mimeType: "audio/webm" });
+        mediaRecorderRef.current = mediaRecorder;
+        
+        mediaRecorder.ondataavailable = (e) => {
+          if (e.data.size > 0 && ws.readyState === WebSocket.OPEN) {
+            ws.send(e.data);
+          }
+        };
+        
+        mediaRecorder.start(250); // send chunks every 250ms
+      };
+
+    } catch (e) {
+      console.error("Live mode error:", e);
+      setLiveModeOpen(false);
+      alert("Could not start Live Mode. Please check microphone permissions.");
+    }
+  };
+
+  const closeLiveMode = () => {
+    if (mediaRecorderRef.current) {
+      mediaRecorderRef.current.stop();
+      mediaRecorderRef.current.stream.getTracks().forEach(t => t.stop());
+    }
+    if (liveWsRef.current) {
+      liveWsRef.current.close();
+    }
+    if (audioContextRef.current) {
+      audioContextRef.current.close();
+    }
+    setLiveModeOpen(false);
+  };
+
   const handleDeleteSession = async (e: React.MouseEvent, id: string) => {
     e.stopPropagation();
-    const backendUrl = process.env.NEXT_PUBLIC_BACKEND_URL || "http://127.0.0.1:8000";
+    const backendUrl = (process.env.NEXT_PUBLIC_BACKEND_URL || "http://127.0.0.1:8000").replace(/\/$/, "");
     const supabase = createClient();
     const { data: { session } } = await supabase.auth.getSession();
     if (!session) return;
@@ -143,7 +308,7 @@ export default function ChatPage() {
   const handleRenameSession = async (e: React.FormEvent, id: string) => {
     e.preventDefault();
     if (!editSessionTitle.trim()) return;
-    const backendUrl = process.env.NEXT_PUBLIC_BACKEND_URL || "http://127.0.0.1:8000";
+    const backendUrl = (process.env.NEXT_PUBLIC_BACKEND_URL || "http://127.0.0.1:8000").replace(/\/$/, "");
     
     setSessions(prev => prev.map(s => s.id === id ? { ...s, title: editSessionTitle } : s));
     setEditingSessionId(null);
@@ -268,7 +433,8 @@ export default function ChatPage() {
 
   const sendMessage = async (e: React.FormEvent) => {
     e.preventDefault();
-    if (!input.trim() || isLoading) return;
+    if (!input.trim() && attachments.length === 0) return;
+    if (isLoading) return;
 
     let currentSessionId = activeSessionId;
     if (!currentSessionId) {
@@ -279,6 +445,11 @@ export default function ChatPage() {
     const userMessage: Message = { id: Date.now().toString(), role: "user", content: input };
     setMessages((prev) => [...prev, userMessage]);
     setInput("");
+    
+    // Save current attachments and clear them
+    const filesToSend = attachments.map(a => ({ mime_type: a.mime_type, data: a.data }));
+    setAttachments([]);
+    
     if (textareaRef.current) textareaRef.current.style.height = "auto";
     setIsLoading(true);
 
@@ -288,7 +459,7 @@ export default function ChatPage() {
       const { data: { session } } = await supabase.auth.getSession();
       const token = session?.access_token;
       
-      const backendUrl = process.env.NEXT_PUBLIC_BACKEND_URL || "http://127.0.0.1:8000";
+      const backendUrl = (process.env.NEXT_PUBLIC_BACKEND_URL || "http://127.0.0.1:8000").replace(/\/$/, "");
 
       const res = await fetch(`${backendUrl}/api/chat/online`, {
         method: "POST",
@@ -298,7 +469,8 @@ export default function ChatPage() {
         },
         body: JSON.stringify({ 
           session_id: currentSessionId,
-          prompt: userMessage.content
+          prompt: userMessage.content,
+          files: filesToSend.length > 0 ? filesToSend : undefined
         }),
       });
       if (!res.ok) {
@@ -337,41 +509,142 @@ export default function ChatPage() {
   if (!mounted) return null;
 
   const inputFormJSX = (
-    <motion.form 
-      layoutId="chat-input-bar"
-      initial={{ borderRadius: 28 }}
-      onSubmit={sendMessage} 
-      className="relative flex items-end gap-2 bg-bg-chatbar rounded-[28px] p-2 pr-4 shadow-sm border border-border-main transition-colors duration-200 w-full"
-    >
-      <button type="button" className="p-3 text-text-main opacity-50 hover:opacity-100 transition-opacity shrink-0">
-        <Plus size={22} />
-      </button>
-      
-      <textarea
-        ref={textareaRef}
-        value={input}
-        onChange={handleInput}
-        onKeyDown={handleKeyDown}
-        placeholder="Ask DuoMind"
-        rows={1}
-        className="flex-1 max-h-[200px] min-h-[44px] bg-transparent resize-none py-3 px-2 text-[15px] text-text-main focus:outline-none placeholder:text-text-main placeholder:opacity-50"
-        disabled={isLoading}
-      />
-      
-      {!input.trim() ? (
-        <button type="button" className="p-3 text-text-main opacity-50 hover:opacity-100 transition-opacity shrink-0 mb-0.5">
-          <Mic size={22} />
-        </button>
-      ) : (
-        <button type="submit" disabled={isLoading} className="p-3 bg-text-main text-bg-main rounded-full transition-transform hover:scale-105 active:scale-95 shrink-0 mb-0.5">
-          <Send size={18} className="ml-0.5" />
-        </button>
+    <div className="w-full flex flex-col gap-2">
+      {attachments.length > 0 && (
+        <div className="flex gap-2 overflow-x-auto p-2 bg-bg-chatbar rounded-2xl border border-border-main">
+          {attachments.map((file, i) => (
+            <div key={i} className="relative shrink-0 w-16 h-16 rounded-lg overflow-hidden border border-border-main bg-bg-main">
+              {file.mime_type.startsWith('image/') ? (
+                <img src={file.previewUrl} alt="preview" className="w-full h-full object-cover" />
+              ) : (
+                <div className="w-full h-full flex items-center justify-center text-xs text-text-main opacity-50">FILE</div>
+              )}
+              <button 
+                type="button" 
+                onClick={() => removeAttachment(i)}
+                className="absolute top-1 right-1 bg-black/50 text-white rounded-full p-0.5 hover:bg-black/70"
+              >
+                <X size={12} />
+              </button>
+            </div>
+          ))}
+        </div>
       )}
-    </motion.form>
+      
+      <motion.form 
+        layoutId="chat-input-bar"
+        initial={{ borderRadius: 28 }}
+        onSubmit={sendMessage} 
+        className="relative flex items-end gap-2 bg-bg-chatbar rounded-[28px] p-2 pr-4 shadow-sm border border-border-main transition-colors duration-200 w-full"
+      >
+        <div className="flex gap-1">
+          <input type="file" ref={fileInputRef} onChange={handleFileSelect} className="hidden" multiple />
+          <button type="button" onClick={() => fileInputRef.current?.click()} className="p-3 text-text-main opacity-50 hover:opacity-100 transition-opacity shrink-0">
+            <Paperclip size={20} />
+          </button>
+          <button type="button" onClick={openCamera} className="p-3 text-text-main opacity-50 hover:opacity-100 transition-opacity shrink-0">
+            <Camera size={20} />
+          </button>
+        </div>
+        
+        <textarea
+          ref={textareaRef}
+          value={input}
+          onChange={handleInput}
+          onKeyDown={handleKeyDown}
+          placeholder="Ask DuoMind"
+          rows={1}
+          className="flex-1 max-h-[200px] min-h-[44px] bg-transparent resize-none py-3 px-2 text-[15px] text-text-main focus:outline-none placeholder:text-text-main placeholder:opacity-50"
+          disabled={isLoading}
+        />
+        
+        {!input.trim() && attachments.length === 0 ? (
+          <div className="flex gap-1">
+            <button 
+              type="button" 
+              onClick={toggleListening}
+              className={`p-3 shrink-0 mb-0.5 transition-all ${isListening ? 'text-red-500 animate-pulse' : 'text-text-main opacity-50 hover:opacity-100'}`}
+            >
+              <Mic size={22} />
+            </button>
+            <button 
+              type="button" 
+              onClick={startLiveMode}
+              className="p-3 text-text-main opacity-50 hover:opacity-100 hover:text-blue-500 transition-all shrink-0 mb-0.5"
+            >
+              <Radio size={22} />
+            </button>
+          </div>
+        ) : (
+          <button type="submit" disabled={isLoading} className="p-3 bg-text-main text-bg-main rounded-full transition-transform hover:scale-105 active:scale-95 shrink-0 mb-0.5">
+            <Send size={18} className="ml-0.5" />
+          </button>
+        )}
+      </motion.form>
+    </div>
   );
 
   return (
     <div className="flex h-screen bg-bg-main overflow-hidden font-sans text-text-main transition-colors duration-300">
+      
+      {/* Live Mode Modal (Phase 3) */}
+      <AnimatePresence>
+        {liveModeOpen && (
+          <div className="fixed inset-0 z-[300] flex flex-col items-center justify-center bg-black backdrop-blur-3xl px-4 overflow-hidden">
+            <button onClick={closeLiveMode} className="absolute top-8 right-8 text-white/50 hover:text-white p-3 rounded-full bg-white/5 transition-colors z-10">
+              <X size={24} />
+            </button>
+            
+            <div className="absolute inset-0 bg-gradient-to-b from-blue-900/20 to-purple-900/20 pointer-events-none" />
+            
+            {/* The 3D Pulsing Orb */}
+            <div className="relative w-64 h-64 flex items-center justify-center mb-16">
+              <motion.div 
+                animate={{ scale: [1, 1.2, 1], rotate: [0, 90, 180, 270, 360] }}
+                transition={{ duration: 4, repeat: Infinity, ease: "linear" }}
+                className="absolute inset-0 rounded-full bg-gradient-to-tr from-blue-500 to-purple-500 opacity-20 blur-3xl"
+              />
+              <motion.div 
+                animate={{ scale: [1, 1.05, 1] }}
+                transition={{ duration: 2, repeat: Infinity, ease: "easeInOut" }}
+                className="relative w-48 h-48 rounded-full bg-gradient-to-tr from-blue-400 to-purple-600 shadow-[0_0_80px_rgba(120,0,255,0.4)] flex items-center justify-center overflow-hidden"
+              >
+                <div className="absolute inset-0 bg-[url('https://www.transparenttextures.com/patterns/stardust.png')] opacity-30 mix-blend-overlay animate-pulse" />
+                <Radio size={48} className="text-white opacity-80" />
+              </motion.div>
+            </div>
+            
+            <motion.div initial={{ opacity: 0, y: 20 }} animate={{ opacity: 1, y: 0 }} className="text-center z-10">
+              <h2 className="text-2xl font-medium text-white mb-2">Listening...</h2>
+              <p className="text-white/50">Speak naturally to DuoMind</p>
+            </motion.div>
+          </div>
+        )}
+      </AnimatePresence>
+
+      {/* Camera Modal */}
+      <AnimatePresence>
+        {cameraModalOpen && (
+          <div className="fixed inset-0 z-[200] flex items-center justify-center bg-black/80 backdrop-blur-md px-4">
+            <motion.div 
+              initial={{ opacity: 0, scale: 0.9 }} animate={{ opacity: 1, scale: 1 }} exit={{ opacity: 0, scale: 0.9 }}
+              className="w-full max-w-lg bg-black border border-white/20 rounded-3xl overflow-hidden flex flex-col shadow-2xl"
+            >
+              <div className="relative w-full aspect-video bg-gray-900">
+                <video ref={videoRef} autoPlay playsInline className="w-full h-full object-cover mirror" />
+                <button onClick={closeCamera} className="absolute top-4 right-4 bg-black/50 text-white rounded-full p-2 hover:bg-white hover:text-black transition-colors">
+                  <X size={20} />
+                </button>
+              </div>
+              <div className="p-6 flex justify-center bg-zinc-950">
+                <button onClick={capturePhoto} className="w-16 h-16 rounded-full border-4 border-white/30 flex items-center justify-center hover:border-white transition-all group">
+                  <div className="w-12 h-12 bg-white rounded-full group-hover:scale-90 transition-transform shadow-[0_0_20px_rgba(255,255,255,0.5)]" />
+                </button>
+              </div>
+            </motion.div>
+          </div>
+        )}
+      </AnimatePresence>
       
       {/* Profile Modal */}
       <AnimatePresence>
@@ -564,7 +837,7 @@ export default function ChatPage() {
                       if (window.innerWidth < 768) setSidebarOpen(false);
                       const supabase = createClient();
                       const { data: { session: authSession } } = await supabase.auth.getSession();
-                      const backendUrl = process.env.NEXT_PUBLIC_BACKEND_URL || "http://127.0.0.1:8000";
+                      const backendUrl = (process.env.NEXT_PUBLIC_BACKEND_URL || "http://127.0.0.1:8000").replace(/\/$/, "");
                       
                       if (authSession?.access_token) {
                         try {
