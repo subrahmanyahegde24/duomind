@@ -301,7 +301,10 @@ export default function ChatPage() {
           prompt: userMessage.content
         }),
       });
-      if (!res.ok) throw new Error("Network response was not ok");
+      if (!res.ok) {
+        const errorText = await res.text();
+        throw new Error(`[HTTP ${res.status}] ${errorText}`);
+      }
       
       const reader = res.body?.getReader();
       const decoder = new TextDecoder("utf-8");
@@ -319,8 +322,8 @@ export default function ChatPage() {
           setMessages((prev) => prev.map(msg => msg.id === botMessageId ? { ...msg, content: accumulatedText } : msg));
         }
       }
-    } catch (error) {
-      setMessages((prev) => [...prev, { id: (Date.now() + 1).toString(), role: "bot", content: "Oops! Failed to connect to the backend." }]);
+    } catch (error: any) {
+      setMessages((prev) => [...prev, { id: (Date.now() + 1).toString(), role: "bot", content: `Oops! Connection failed: ${error.message}` }]);
     } finally {
       setIsLoading(false);
       setTimeout(() => {
