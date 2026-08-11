@@ -6,7 +6,7 @@ import asyncio
 from google import genai
 from google.genai import types
 from app.api.dependencies import get_gemini_service
-from app.api.auth_deps import get_current_user
+from app.api.auth_deps import get_current_user, get_supabase
 from app.services.gemini_service import GeminiService
 from app.services.memory_service import MemoryService
 from app.core.config import settings
@@ -14,37 +14,95 @@ from app.core.config import settings
 router = APIRouter()
 memory_service = MemoryService()
 
-@router.websocket("/live")
-async def live_chat_websocket(websocket: WebSocket):
+import websockets
+import json
+import base64
+
+@router.websocket("/live/{session_id}")
+async def live_chat_websocket(websocket: WebSocket, session_id: str, token: str = None):
+    if not token:
+        await websocket.close()
+        return
+    supabase = get_supabase()
+    user_response = supabase.auth.get_user(token)
+    if not user_response or not user_response.user:
+        await websocket.close()
+        return
+    user_id = user_response.user.id
+
     await websocket.accept()
-    client = genai.Client(api_key=settings.gemini_api_key)
+    
+    ws_url = f"wss://generativelanguage.googleapis.com/ws/google.ai.generativelanguage.v1beta.GenerativeService.BidiGenerateContent?key={settings.gemini_api_key}"
     
     try:
-        async with client.aio.live.connect(model="gemini-3.1-flash-live-preview", config={"system_instruction": {"parts": [{"text": "You are DuoMind, a conversational voice assistant. Be extremely concise and natural."}]}}) as session:
+        async with websockets.connect(ws_url) as google_ws:
+            # 1. Send the initial configuration
+            setup_message = {
+                "setup": {
+                    "model": "models/gemini-3.1-flash-live-preview",
+                    "generationConfig": {
+                        "responseModalities": ["AUDIO"]
+                    },
+                    "systemInstruction": {
+                        "parts": [{"text": "You are DuoMind, a conversational voice assistant. Be extremely concise and natural."}]
+                    }
+                }
+            }
+            await google_ws.send(json.dumps(setup_message))
             
             async def receive_from_browser():
                 try:
                     while True:
+                        # Receive WebM chunks from browser
                         data = await websocket.receive_bytes()
-                        # Forward audio blobs to Gemini (defaults to expecting PCM or WebM)
-                        await session.send(input={"data": data, "mime_type": "audio/webm"})
+                        # Send as realtimeInput to Google
+                        realtime_input = {
+                            "realtimeInput": {
+                                "audio": {
+                                    "mimeType": "audio/pcm;rate=16000",
+                                    "data": base64.b64encode(data).decode('utf-8')
+                                }
+                            }
+                        }
+                        await google_ws.send(json.dumps(realtime_input))
                 except WebSocketDisconnect:
                     pass
 
             async def receive_from_gemini():
-                async for response in session.receive():
-                    server_content = response.server_content
-                    if server_content is not None:
-                        model_turn = server_content.model_turn
-                        if model_turn is not None:
-                            for part in model_turn.parts:
-                                if part.inline_data and part.inline_data.data:
-                                    # Forward binary audio frames back to the browser
-                                    await websocket.send_bytes(part.inline_data.data)
+                ai_text_buffer = ""
+                async for response_str in google_ws:
+                    try:
+                        response_json = json.loads(response_str)
+                        server_content = response_json.get("serverContent", {})
+                        model_turn = server_content.get("modelTurn", {})
+                        parts = model_turn.get("parts", [])
+                        turn_complete = server_content.get("turnComplete", False)
+                        
+                        text_response = ""
+                        for part in parts:
+                            if "text" in part:
+                                text_response += part["text"]
+                            inline_data = part.get("inlineData")
+                            if inline_data and inline_data.get("data"):
+                                # Decode the base64 audio and send binary to browser
+                                audio_bytes = base64.b64decode(inline_data["data"])
+                                await websocket.send_bytes(audio_bytes)
+                                
+                        if text_response:
+                            ai_text_buffer += text_response
+                            await websocket.send_text(json.dumps({"type": "text", "content": text_response}))
+                            
+                        if turn_complete and ai_text_buffer:
+                            # Save full response to DB
+                            memory_service.add_message(session_id, user_id, "model", ai_text_buffer, [])
+                            ai_text_buffer = ""
+                    except Exception as e:
+                        pass
             
             await asyncio.gather(receive_from_browser(), receive_from_gemini())
     except Exception as e:
-        print("WebSocket Live Error:", e)
+        import traceback
+        traceback.print_exc()
         try:
             await websocket.close()
         except:

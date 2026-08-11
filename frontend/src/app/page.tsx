@@ -38,9 +38,14 @@ export default function ChatPage() {
   const recognitionRef = useRef<any>(null);
   
   const [liveModeOpen, setLiveModeOpen] = useState(false);
+  const [uploadMenuOpen, setUploadMenuOpen] = useState(false);
   const liveWsRef = useRef<WebSocket | null>(null);
-  const mediaRecorderRef = useRef<MediaRecorder | null>(null);
   const audioContextRef = useRef<AudioContext | null>(null);
+  const processorRef = useRef<ScriptProcessorNode | null>(null);
+  const sourceRef = useRef<MediaStreamAudioSourceNode | null>(null);
+  const animationFrameRef = useRef<number | null>(null);
+  const [liveStatus, setLiveStatus] = useState<"Listening..." | "DuoMind is speaking...">("Listening...");
+  const [userVolume, setUserVolume] = useState(1);
   
   const [settingsOpen, setSettingsOpen] = useState(false);
   
@@ -250,43 +255,78 @@ export default function ChatPage() {
   const startLiveMode = async () => {
     setLiveModeOpen(true);
     const backendWsUrl = (process.env.NEXT_PUBLIC_BACKEND_URL || "http://127.0.0.1:8000").replace(/\/$/, "").replace(/^http/, "ws");
+    const supabase = createClient();
+    const { data: { session } } = await supabase.auth.getSession();
+    const token = session?.access_token || "";
+    let currentSessionId = activeSessionId;
+    if (!currentSessionId) {
+      currentSessionId = crypto.randomUUID();
+      setActiveSessionId(currentSessionId);
+    }
+    
+    const wsUrl = `${process.env.NEXT_PUBLIC_BACKEND_URL?.replace('http', 'ws') || 'ws://localhost:8000'}/api/chat/live/${currentSessionId}?token=${token}`;
     
     try {
       const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
       const AudioContext = window.AudioContext || (window as any).webkitAudioContext;
       audioContextRef.current = new AudioContext({ sampleRate: 24000 });
       
-      const ws = new WebSocket(`${backendWsUrl}/api/chat/live`);
+      const ws = new WebSocket(wsUrl);
       liveWsRef.current = ws;
       
       ws.binaryType = "arraybuffer";
       
       let nextPlayTime = 0;
+      let speakingTimeout: NodeJS.Timeout;
       
       ws.onmessage = async (event) => {
+        if (typeof event.data === "string") {
+            try {
+                const data = JSON.parse(event.data);
+                if (data.type === "text") {
+                    setMessages(prev => {
+                        const newMsgs = [...prev];
+                        const lastMsg = newMsgs[newMsgs.length - 1];
+                        if (lastMsg && lastMsg.role === 'model') {
+                            lastMsg.content += data.content;
+                        } else {
+                            newMsgs.push({ role: 'model', content: data.content, created_at: new Date().toISOString() });
+                        }
+                        return newMsgs;
+                    });
+                }
+            } catch (e) {}
+            return;
+        }
+
         if (event.data instanceof ArrayBuffer) {
            try {
+              setLiveStatus("DuoMind is speaking...");
+              clearTimeout(speakingTimeout);
+              speakingTimeout = setTimeout(() => setLiveStatus("Listening..."), 1500);
+
               const audioCtx = audioContextRef.current;
               if (!audioCtx) return;
               
-              // Gemini returns PCM data natively via the server_content inline_data.
-              // To play raw PCM, we create an AudioBuffer.
-              // A 16-bit PCM at 24kHz needs to be decoded, but for simplicity, 
-              // we can rely on standard decodeAudioData if it's packed in a WAV header by Gemini,
-              // or manually feed it if it's raw. Assuming Gemini SDK handles format properly,
-              // or we just decode standard audio blobs:
-              const decodedData = await audioCtx.decodeAudioData(event.data.slice(0));
+              const pcm16 = new Int16Array(event.data);
+              const audioBuffer = audioCtx.createBuffer(1, pcm16.length, 24000);
+              const channelData = audioBuffer.getChannelData(0);
+              
+              for (let i = 0; i < pcm16.length; i++) {
+                channelData[i] = pcm16[i] / 32768.0;
+              }
+              
               const source = audioCtx.createBufferSource();
-              source.buffer = decodedData;
+              source.buffer = audioBuffer;
               source.connect(audioCtx.destination);
               
               const currentTime = audioCtx.currentTime;
               if (currentTime < nextPlayTime) {
                 source.start(nextPlayTime);
-                nextPlayTime += decodedData.duration;
+                nextPlayTime += audioBuffer.duration;
               } else {
                 source.start(currentTime);
-                nextPlayTime = currentTime + decodedData.duration;
+                nextPlayTime = currentTime + audioBuffer.duration;
               }
            } catch(e) {
               console.error("Audio decode error", e);
@@ -295,16 +335,45 @@ export default function ChatPage() {
       };
 
       ws.onopen = () => {
-        const mediaRecorder = new MediaRecorder(stream, { mimeType: "audio/webm" });
-        mediaRecorderRef.current = mediaRecorder;
+        // Setup raw PCM audio capture at 16kHz for Gemini
+        const audioCtx = new ((window as any).AudioContext || (window as any).webkitAudioContext)({ sampleRate: 16000 });
+        audioContextRef.current = audioCtx;
         
-        mediaRecorder.ondataavailable = (e) => {
-          if (e.data.size > 0 && ws.readyState === WebSocket.OPEN) {
-            ws.send(e.data);
+        const source = audioCtx.createMediaStreamSource(stream);
+        sourceRef.current = source;
+        
+        const analyser = audioCtx.createAnalyser();
+        analyser.fftSize = 256;
+        source.connect(analyser);
+        const dataArray = new Uint8Array(analyser.frequencyBinCount);
+        
+        const updateVolume = () => {
+           if (!liveModeOpen) return;
+           analyser.getByteFrequencyData(dataArray);
+           const sum = dataArray.reduce((a, b) => a + b, 0);
+           const avg = sum / dataArray.length;
+           // Map average (0-255) to a scale factor (1 to 1.5)
+           setUserVolume(1 + (avg / 255) * 0.5);
+           animationFrameRef.current = requestAnimationFrame(updateVolume);
+        };
+        updateVolume();
+        
+        const processor = audioCtx.createScriptProcessor(4096, 1, 1);
+        processorRef.current = processor;
+        
+        processor.onaudioprocess = (e) => {
+          const inputData = e.inputBuffer.getChannelData(0);
+          const pcm16 = new Int16Array(inputData.length);
+          for (let i = 0; i < inputData.length; i++) {
+            pcm16[i] = Math.max(-1, Math.min(1, inputData[i])) * 32767;
+          }
+          if (ws.readyState === WebSocket.OPEN) {
+            ws.send(pcm16.buffer);
           }
         };
         
-        mediaRecorder.start(250); // send chunks every 250ms
+        source.connect(processor);
+        processor.connect(audioCtx.destination); // Required for script processor to run
       };
 
     } catch (e) {
@@ -315,15 +384,25 @@ export default function ChatPage() {
   };
 
   const closeLiveMode = () => {
-    if (mediaRecorderRef.current) {
-      mediaRecorderRef.current.stop();
-      mediaRecorderRef.current.stream.getTracks().forEach(t => t.stop());
+    if (animationFrameRef.current) {
+      cancelAnimationFrame(animationFrameRef.current);
+    }
+    if (processorRef.current) {
+      processorRef.current.disconnect();
+      processorRef.current = null;
+    }
+    if (sourceRef.current) {
+      sourceRef.current.disconnect();
+      sourceRef.current.mediaStream.getTracks().forEach(t => t.stop());
+      sourceRef.current = null;
     }
     if (liveWsRef.current) {
       liveWsRef.current.close();
+      liveWsRef.current = null;
     }
     if (audioContextRef.current) {
       audioContextRef.current.close();
+      audioContextRef.current = null;
     }
     setLiveModeOpen(false);
   };
@@ -553,42 +632,58 @@ export default function ChatPage() {
   if (!mounted) return null;
 
   const inputFormJSX = (
-    <div className="w-full flex flex-col gap-2">
+    <motion.form 
+      layoutId="chat-input-bar"
+      initial={{ borderRadius: 28 }}
+      onSubmit={sendMessage} 
+      className="relative flex flex-col bg-bg-chatbar rounded-[28px] p-2 pr-4 shadow-sm border border-border-main transition-colors duration-200 w-full"
+    >
       {attachments.length > 0 && (
-        <div className="flex gap-2 overflow-x-auto p-2 bg-bg-chatbar rounded-2xl border border-border-main">
+        <div className="flex gap-2 overflow-x-auto p-2 pb-0 mb-2">
           {attachments.map((file, i) => (
             <div key={i} className="relative shrink-0 w-16 h-16 rounded-lg overflow-hidden border border-border-main bg-bg-main">
               {file.mime_type.startsWith('image/') ? (
                 <img src={file.previewUrl} alt="preview" className="w-full h-full object-cover" />
               ) : (
-                <div className="w-full h-full flex items-center justify-center text-xs text-text-main opacity-50">FILE</div>
+                <div className="w-full h-full flex items-center justify-center text-[10px] font-bold text-text-main opacity-50 bg-black/5 dark:bg-white/5">FILE</div>
               )}
               <button 
                 type="button" 
                 onClick={() => removeAttachment(i)}
-                className="absolute top-1 right-1 bg-black/50 text-white rounded-full p-0.5 hover:bg-black/70"
+                className="absolute top-1 right-1 bg-black/60 text-white rounded-full p-1 hover:bg-black/90 transition-colors"
               >
-                <X size={12} />
+                <X size={10} />
               </button>
             </div>
           ))}
         </div>
       )}
       
-      <motion.form 
-        layoutId="chat-input-bar"
-        initial={{ borderRadius: 28 }}
-        onSubmit={sendMessage} 
-        className="relative flex items-end gap-2 bg-bg-chatbar rounded-[28px] p-2 pr-4 shadow-sm border border-border-main transition-colors duration-200 w-full"
-      >
-        <div className="flex gap-1">
+      <div className="flex items-end gap-2 w-full">
+        <div className="relative flex gap-1">
           <input type="file" ref={fileInputRef} onChange={handleFileSelect} className="hidden" multiple />
-          <button type="button" onClick={() => fileInputRef.current?.click()} className="p-3 text-text-main opacity-50 hover:opacity-100 transition-opacity shrink-0">
-            <Paperclip size={20} />
+          <button type="button" onClick={() => setUploadMenuOpen(!uploadMenuOpen)} className="p-3 text-text-main opacity-50 hover:opacity-100 transition-all shrink-0">
+            <Plus size={22} className={`transition-transform duration-300 ${uploadMenuOpen ? 'rotate-45' : ''}`} />
           </button>
-          <button type="button" onClick={openCamera} className="p-3 text-text-main opacity-50 hover:opacity-100 transition-opacity shrink-0">
-            <Camera size={20} />
-          </button>
+          
+          <AnimatePresence>
+            {uploadMenuOpen && (
+              <motion.div 
+                initial={{ opacity: 0, y: 10, scale: 0.95 }}
+                animate={{ opacity: 1, y: 0, scale: 1 }}
+                exit={{ opacity: 0, y: 10, scale: 0.95 }}
+                transition={{ duration: 0.15 }}
+                className="absolute bottom-[120%] left-0 w-56 bg-bg-sidebar border border-border-main rounded-2xl shadow-xl overflow-hidden flex flex-col z-50 py-1.5"
+              >
+                <button type="button" onClick={() => { fileInputRef.current?.click(); setUploadMenuOpen(false); }} className="flex items-center gap-3 px-4 py-3 hover:bg-black/5 dark:hover:bg-white/5 transition-colors text-left text-[14px] font-medium">
+                  <Paperclip size={18} className="opacity-70" /> Upload Image or File
+                </button>
+                <button type="button" onClick={() => { openCamera(); setUploadMenuOpen(false); }} className="flex items-center gap-3 px-4 py-3 hover:bg-black/5 dark:hover:bg-white/5 transition-colors text-left text-[14px] font-medium">
+                  <Camera size={18} className="opacity-70" /> Take a Photo
+                </button>
+              </motion.div>
+            )}
+          </AnimatePresence>
         </div>
         
         <textarea
@@ -606,17 +701,17 @@ export default function ChatPage() {
           <div className="flex gap-1">
             <button 
               type="button" 
-              onClick={toggleListening}
-              className={`p-3 shrink-0 mb-0.5 transition-all ${isListening ? 'text-red-500 animate-pulse' : 'text-text-main opacity-50 hover:opacity-100'}`}
-            >
-              <Mic size={22} />
-            </button>
-            <button 
-              type="button" 
               onClick={startLiveMode}
               className="p-3 text-text-main opacity-50 hover:opacity-100 hover:text-blue-500 transition-all shrink-0 mb-0.5"
             >
               <Radio size={22} />
+            </button>
+            <button 
+              type="button" 
+              onClick={toggleListening}
+              className={`p-3 shrink-0 mb-0.5 transition-all ${isListening ? 'text-red-500 animate-pulse' : 'text-text-main opacity-50 hover:opacity-100'}`}
+            >
+              <Mic size={22} />
             </button>
           </div>
         ) : (
@@ -624,8 +719,8 @@ export default function ChatPage() {
             <Send size={18} className="ml-0.5" />
           </button>
         )}
-      </motion.form>
-    </div>
+      </div>
+    </motion.form>
   );
 
   return (
@@ -641,27 +736,32 @@ export default function ChatPage() {
             
             <div className="absolute inset-0 bg-gradient-to-b from-blue-900/20 to-purple-900/20 pointer-events-none" />
             
-            {/* The 3D Pulsing Orb */}
-            <div className="relative w-64 h-64 flex items-center justify-center mb-16">
-              <motion.div 
-                animate={{ scale: [1, 1.2, 1], rotate: [0, 90, 180, 270, 360] }}
-                transition={{ duration: 4, repeat: Infinity, ease: "linear" }}
-                className="absolute inset-0 rounded-full bg-gradient-to-tr from-blue-500 to-purple-500 opacity-20 blur-3xl"
-              />
-              <motion.div 
-                animate={{ scale: [1, 1.05, 1] }}
-                transition={{ duration: 2, repeat: Infinity, ease: "easeInOut" }}
-                className="relative w-48 h-48 rounded-full bg-gradient-to-tr from-blue-400 to-purple-600 shadow-[0_0_80px_rgba(120,0,255,0.4)] flex items-center justify-center overflow-hidden"
-              >
-                <div className="absolute inset-0 bg-[url('https://www.transparenttextures.com/patterns/stardust.png')] opacity-30 mix-blend-overlay animate-pulse" />
-                <Radio size={48} className="text-white opacity-80" />
-              </motion.div>
+            {/* The Gemini Horizontal Frequency Waveform */}
+            <div className="relative flex items-center justify-center mb-16 h-32 space-x-1.5 px-8">
+              {[...Array(40)].map((_, i) => {
+                // Bell curve: center bars (20) have a scale of ~1, outer bars have a scale down to ~0.1
+                const distanceFromCenter = Math.abs(20 - i);
+                const baseScale = Math.max(0.1, 1 - (distanceFromCenter * 0.04));
+                
+                // If speaking, random height within scale. If listening, react to user volume.
+                return (
+                  <motion.div
+                    key={i}
+                    animate={{ 
+                      height: liveStatus === "DuoMind is speaking..." 
+                        ? [10 * baseScale, (30 + Math.random() * 50) * baseScale, 10 * baseScale] 
+                        : (userVolume > 1.05 ? 10 * baseScale + Math.random() * 60 * baseScale * (userVolume - 1) * 2 : 10 * baseScale)
+                    }}
+                    transition={{ 
+                      duration: liveStatus === "DuoMind is speaking..." ? 0.6 + Math.random() * 0.4 : 0.1, 
+                      repeat: liveStatus === "DuoMind is speaking..." ? Infinity : 0, 
+                      ease: "easeInOut" 
+                    }}
+                    className={`w-1.5 rounded-full ${liveStatus === "DuoMind is speaking..." ? "bg-cyan-400" : "bg-gray-400"}`}
+                  />
+                );
+              })}
             </div>
-            
-            <motion.div initial={{ opacity: 0, y: 20 }} animate={{ opacity: 1, y: 0 }} className="text-center z-10">
-              <h2 className="text-2xl font-medium text-white mb-2">Listening...</h2>
-              <p className="text-white/50">Speak naturally to DuoMind</p>
-            </motion.div>
           </div>
         )}
       </AnimatePresence>
