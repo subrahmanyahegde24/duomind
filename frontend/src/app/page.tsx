@@ -14,6 +14,7 @@ type Message = {
   id: string;
   role: "user" | "bot";
   content: string;
+  attachments?: { mime_type: string; data: string; previewUrl?: string }[];
 };
 
 export default function ChatPage() {
@@ -266,6 +267,55 @@ export default function ChatPage() {
     
     const wsUrl = `${process.env.NEXT_PUBLIC_BACKEND_URL?.replace('http', 'ws') || 'ws://localhost:8000'}/api/chat/live/${currentSessionId}?token=${token}`;
     
+    // Background text-sync fallback since the Live model doesn't support text modality
+    const SpeechRecognition = (window as any).SpeechRecognition || (window as any).webkitSpeechRecognition;
+    if (SpeechRecognition) {
+      const recognition = new SpeechRecognition();
+      recognition.continuous = true;
+      recognition.interimResults = false;
+      
+      recognition.onresult = async (event: any) => {
+        let finalTranscript = '';
+        for (let i = event.resultIndex; i < event.results.length; ++i) {
+          if (event.results[i].isFinal) finalTranscript += event.results[i][0].transcript;
+        }
+        if (finalTranscript.trim() && token) {
+           const backendUrl = (process.env.NEXT_PUBLIC_BACKEND_URL || "http://127.0.0.1:8000").replace(/\/$/, "");
+           try {
+             await fetch(`${backendUrl}/api/chat/online`, {
+               method: "POST",
+               headers: { "Content-Type": "application/json", "Authorization": `Bearer ${token}` },
+               body: JSON.stringify({ session_id: currentSessionId, prompt: finalTranscript.trim() }),
+             });
+             // Trigger a refresh of the chat history
+             const res = await fetch(`${backendUrl}/api/chat/sessions/${currentSessionId}/messages`, {
+               headers: { "Authorization": `Bearer ${token}` }
+             });
+             if (res.ok) {
+               const data = await res.json();
+               setMessages(data.messages.map((m: any, i: number) => ({ id: `history-${i}`, role: m.role, content: m.content })));
+             }
+           } catch(e) {}
+        }
+      };
+
+      recognition.onend = () => {
+         if ((window as any).liveRecognition) {
+            try { recognition.start(); } catch (e) {}
+         }
+      };
+      
+      recognition.onerror = (e: any) => {
+         console.error("Speech recognition error:", e.error);
+         if (e.error === "no-speech" && (window as any).liveRecognition) {
+            try { recognition.start(); } catch (err) {}
+         }
+      };
+
+      recognition.start();
+      (window as any).liveRecognition = recognition;
+    }
+    
     try {
       const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
       const AudioContext = window.AudioContext || (window as any).webkitAudioContext;
@@ -348,7 +398,6 @@ export default function ChatPage() {
         const dataArray = new Uint8Array(analyser.frequencyBinCount);
         
         const updateVolume = () => {
-           if (!liveModeOpen) return;
            analyser.getByteFrequencyData(dataArray);
            const sum = dataArray.reduce((a, b) => a + b, 0);
            const avg = sum / dataArray.length;
@@ -403,6 +452,10 @@ export default function ChatPage() {
     if (audioContextRef.current) {
       audioContextRef.current.close();
       audioContextRef.current = null;
+    }
+    if ((window as any).liveRecognition) {
+      try { (window as any).liveRecognition.stop(); } catch(e) {}
+      (window as any).liveRecognition = null;
     }
     setLiveModeOpen(false);
   };
@@ -565,7 +618,8 @@ export default function ChatPage() {
       setActiveSessionId(currentSessionId);
     }
 
-    const userMessage: Message = { id: Date.now().toString(), role: "user", content: input };
+    const filesToStore = attachments.map(a => ({ mime_type: a.mime_type, data: a.data, previewUrl: a.previewUrl }));
+    const userMessage: Message = { id: Date.now().toString(), role: "user", content: input, attachments: filesToStore };
     setMessages((prev) => [...prev, userMessage]);
     setInput("");
     
@@ -757,7 +811,7 @@ export default function ChatPage() {
                       repeat: liveStatus === "DuoMind is speaking..." ? Infinity : 0, 
                       ease: "easeInOut" 
                     }}
-                    className={`w-1.5 rounded-full ${liveStatus === "DuoMind is speaking..." ? "bg-cyan-400" : "bg-gray-400"}`}
+                    className={`w-1.5 rounded-full ${liveStatus === "DuoMind is speaking..." ? "bg-gradient-to-t from-cyan-400 via-blue-500 to-purple-500 shadow-[0_0_15px_rgba(0,255,255,0.8)]" : "bg-gradient-to-t from-pink-500 via-red-500 to-yellow-500 shadow-[0_0_15px_rgba(255,0,128,0.8)]"}`}
                   />
                 );
               })}
@@ -1093,8 +1147,17 @@ export default function ChatPage() {
                     {messages.map((msg) => (
                       <div key={msg.id} className="flex w-full">
                         {msg.role === "user" ? (
-                          <div className="ml-auto bg-bg-chatbar border border-border-main px-5 py-3 rounded-[24px] max-w-[85%] text-[15px] whitespace-pre-wrap">
-                            {msg.content}
+                          <div className="ml-auto max-w-[85%] flex flex-col items-end">
+                            {msg.attachments && msg.attachments.length > 0 && (
+                              <div className="flex flex-wrap gap-2 mb-2 justify-end">
+                                {msg.attachments.map((file, i) => (
+                                  <img key={i} src={file.previewUrl || `data:${file.mime_type};base64,${file.data}`} alt="attachment" className="h-48 w-auto object-cover rounded-2xl border border-border-main" />
+                                ))}
+                              </div>
+                            )}
+                            <div className="bg-bg-chatbar border border-border-main px-5 py-3 rounded-[24px] text-[15px] whitespace-pre-wrap">
+                              {msg.content}
+                            </div>
                           </div>
                         ) : (
                           <div className="w-full flex gap-4">
